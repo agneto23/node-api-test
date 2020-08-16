@@ -1,0 +1,12 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: presentacion-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: presentacion
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80

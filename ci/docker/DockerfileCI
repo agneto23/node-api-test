@@ -1,0 +1,15 @@
+FROM node:12-alpine
+LABEL version="1.0"
+
+WORKDIR /app
+
+COPY package*.json /app/
+
+RUN apk add tzdata
+RUN cp /usr/share/zoneinfo/EST /etc/localtime
+RUN apk del tzdata
+
+COPY ./ /app/
+RUN npm run build:all
+
+CMD [ "npm", "start" ]

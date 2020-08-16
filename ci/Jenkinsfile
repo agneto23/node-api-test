@@ -1,0 +1,218 @@
+@Library('devops-library') _
+
+pipeline {
+    agent {
+      kubernetes {
+        label 'angular-slave'
+        yaml """
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            labels:
+              jenkins-agent: angular8-jnlp-slave
+              jenkins/angular-slave: true
+          spec:
+            serviceAccount: cd-jenkins
+            containers:
+            - name: git
+              image: alpine/git:latest
+              command:
+              - cat
+              tty: true
+            - name: nodejs
+              image: cdocregpro.pronaca.com/jenkins/angular8-jnlp-slave:1.0.0
+              securityContext:
+                privileged: true
+              command:
+              - cat
+              tty: true
+            - name: buildah
+              image: quay.io/buildah/stable
+              securityContext:
+                privileged: true
+              command:
+              - cat
+              tty: true
+            imagePullSecrets:
+            - name: regopen
+          """
+      }
+    }
+
+    environment {
+      slackNotificationChannel = 'aba'
+      NEXUS_COMMON_CREDS = credentials('nexuspronaca')
+      CLUSTER_CREDS = credentials('cluster-credentials')
+      JAVA_HOME = tool 'jdk8'
+      scannerHome = tool 'SonarScanner 4.3.0';
+    }
+
+    options {
+      disableConcurrentBuilds()
+      skipDefaultCheckout(true)
+      buildDiscarder(logRotator(numToKeepStr: '10'))
+      timeout(time: 15, unit: 'MINUTES')
+    }
+
+    stages {
+
+      stage('Checkout code') {
+        steps {
+          echo "Cambios en la rama ${env.BRANCH_NAME}\n"
+          echo 'Checkout code'
+          checkout scm
+        }
+      }
+
+      stage('Set up environment') {
+        steps {
+          container('git') {
+            script {
+              abortAllPreviousBuildInProgress(currentBuild)
+
+              env.GIT_URL = sh(returnStdout: true, script: "git config --get remote.origin.url").trim()
+              env.GIT_REPO_NAME = "${env.GIT_URL}".tokenize('/').last().split("\\.")[0]
+              env.GIT_SHORT_COMMIT = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%h'").trim()
+              env.GIT_COMMIT = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%H'").trim()
+              env.GIT_COMMIT_MSG = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%s'").trim()
+
+              if (env.CHANGE_ID == null){
+                env.GIT_USER_NAME = sh(script: "git show -s --pretty='%an' ${env.GIT_COMMIT}", returnStdout: true).trim()
+                env.GIT_USER_EMAIL = sh(script: "git --no-pager show -s --format='%ae' ${env.GIT_COMMIT}", returnStdout: true).trim()
+              }
+
+              echo "Usuario: ${env.GIT_USER_NAME}"
+              echo "Email: ${env.GIT_USER_EMAIL}"
+
+            }
+          }
+          container('nodejs') {
+            script {
+             env.VERSION_APP = sh(script: "npm run-script version |tail -1", returnStdout: true).trim()
+              env.NAME_APP = sh(script: "npm run-script name |tail -1", returnStdout: true).trim()
+              env.DOCKER_REGISTRY = sh(script: "npm run-script dockerRegistry |tail -1", returnStdout: true).trim()
+              env.DOCKER_REGISTRY_IMAGE = env.DOCKER_REGISTRY +'/'+ env.NAME_APP.replace('@','') +':'+ env.VERSION_APP
+              env.DOCKER_REGISTRY_IMAGE_LATEST = env.DOCKER_REGISTRY +'/'+ env.NAME_APP.replace('@','') +':latest'
+              sh 'printenv'
+            }
+          }
+        }
+      }
+
+      stage('Install dependencies') {
+        steps {
+          container('nodejs') {
+            echo 'Install NPM dependencies'
+            sh '''
+                npm install -f --no-package-lock -d --quiet --loglevel=warn
+            '''
+          }
+        }
+      }
+
+      stage('Test/QC') {
+        parallel {
+          stage('Unit Test') {
+            steps {
+              container('nodejs') {
+              echo 'Test project'
+              sh '''
+                npm run-script test
+              '''
+              }
+            }
+            post {
+              always {
+                junit allowEmptyResults: true, testResults: '**/test-results.xml'
+              }
+            }
+          }
+
+          stage('Code Quality - Lint') {
+            steps {
+              container('nodejs') {
+                script {
+                  echo 'Code quality'
+                  try {
+                    sh 'npm run-script lint'
+                  }catch (err) {
+                    echo err.getMessage()
+                    echo "Error detected on code quality lint, but we will continue."
+                  }
+                }
+              }
+            }
+          }
+
+          stage('Code Quality - Sonarqube') {
+            steps {
+              container('nodejs') {
+                echo 'Code quality'
+                withSonarQubeEnv('SonarQubePronaca') {
+                  sh "npm run-script cover && ${scannerHome}/bin/sonar-scanner"
+                }
+              }
+            }
+          }
+        }
+      }
+
+      stage('Build') {
+        steps {
+          container('nodejs') {
+            echo 'Start build project'
+            sh 'npm run-script build:ci'
+          }
+        }
+      }
+
+      stage('Build docker') {
+        steps {
+          container('buildah') {
+            echo 'Start build buildah'
+            sh 'buildah version'
+            sh "buildah bud -t ${env.DOCKER_REGISTRY_IMAGE} -f ./ci/docker/DockerfileCI ."
+            sh "buildah tag ${env.DOCKER_REGISTRY_IMAGE} ${env.DOCKER_REGISTRY_IMAGE_LATEST}"
+          }
+        }
+      }
+
+      stage('Publish docker image') {
+        when {
+          expression { env.BRANCH_NAME == 'master' }
+        }
+        steps {
+          container('buildah') {
+            script {
+              try {
+                sh "buildah login -u ${NEXUS_COMMON_CREDS_USR} -p ${NEXUS_COMMON_CREDS_PSW} https://${env.DOCKER_REGISTRY}"
+                echo 'Start publish image docker to registry'
+                sh "buildah push ${env.DOCKER_REGISTRY_IMAGE}"
+                sh "buildah push ${env.DOCKER_REGISTRY_IMAGE_LATEST}"
+              }catch (err) {
+                echo err.getMessage()
+                echo "Error detected on publish docker image, but we will continue."
+              }
+            }
+          }
+        }
+      }
+
+    }
+
+    post {
+      always {
+        echo "Pipeline finalizado del repositorio de la rama ${env.BRANCH_NAME} con el codigo de construccion ${env.BUILD_ID} en ${env.JENKINS_URL}"
+      }
+      success {
+        slackNotifySuccess(slackNotificationChannel)
+      }
+      failure {
+        slackNotifyFailure(slackNotificationChannel)
+      }
+      unstable {
+        slackNotifyUnstable(slackNotificationChannel)
+      }
+    }
+}
+
