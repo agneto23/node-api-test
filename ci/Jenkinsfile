@@ -157,14 +157,14 @@ pipeline {
         }
       }
 
-      stage('Build') {
-        steps {
-          container('nodejs') {
-            echo 'Start build project'
-            sh 'npm run-script build:ci'
-          }
-        }
-      }
+//       stage('Build') {
+//         steps {
+//           container('nodejs') {
+//             echo 'Start build project'
+//             sh 'npm run-script build:ci'
+//           }
+//         }
+//       }
 
       stage('Build docker') {
         steps {
