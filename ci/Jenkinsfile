@@ -117,7 +117,7 @@ pipeline {
               container('nodejs') {
               echo 'Test project'
               sh '''
-                npm run-script test
+                npm run-script test:unit
               '''
               }
             }
