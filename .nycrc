@@ -1,0 +1,3 @@
+{
+  "exclude": ["src/routes/routes.ts","test/**/*.spec.integration.ts","src/**/*.spec.ts"]
+}
